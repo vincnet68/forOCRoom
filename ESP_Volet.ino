@@ -1,11 +1,19 @@
-/* Release du 01/01/2018 pour module electrodragon
+
+
+/* Version du 21/01/2018 par vincnet68
+
  * SKETCH fonctionnant sur wemos D1 MINI POUR COMMANDE DE VOLET ROULANT FILAIRE AVEC RENVOI DE LA POSITION DU VOLET EN POURCENTAGE
- * HARD : https://www.jeedom.com/forum/viewtopic.php?f=185&t=25017&sid=c757bad46d600f07820dab2a45ec8b33
- * LIBRAIRIES : https://github.com/marvinroger/arduino-shutters V3 beta4 (voir bibliothèque IDE Arduino)
+ * HARD Module sur Rail DIN (Alcor_fr et Rolrider): https://www.jeedom.com/forum/viewtopic.php?f=185&t=25017&sid=c757bad46d600f07820dab2a45ec8b33
+ * LIBRAIRIES : https://github.com/marvinroger/arduino-shutters
+ *              https://github.com/mathertel/OneButton
+ *              https://github.com/esp8266/Arduino/blob/master/libraries/Ticker/Ticker.h
  * AJOUT de l'OTA 
  * AJOUT de WiFiManager
  * Possibilité d'enregistrer l'adresse IP de son broker MQTT
- * Possibilité d'enregistrer les temps de course monté et descente
+ * Possibilité d'enregistrer le temp de course
+ * Possibilité d'enregistrer le nom du module (utilisé pour le WifiManager portal, et la publication MQTT)
+ * Utilisation de 2 boutons poussoir pour la commande (commande local, et envoie de double click et long click par MQTT)
+ * Utilisation de la lib Tick pour garder les commandes local disponible même en cas de déconnection wifi ou MQTT
  */
 #include <FS.h>
 #include <Shutters.h>
@@ -21,66 +29,91 @@
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
+#include <OneButton.h>
+#include <Ticker.h>
 
-
+bool DisableRazFunction = false; //Disable the raz function with the button
 bool debug = true;  //Affiche sur la console si True
 bool raz = false;   //Réinitialise la zone SPIFFS et WiFiManager si True
 long lastMsg = 0;
 long lastConnect = 0;
 char mqtthost[16] = ""; //Variable qui sera utilisée par WiFiManager pour enregistrer l'adresse IP du broker MQTT
-const char* PASS = "password"; //A modifier avec le mot de passe voulu, il sera utilise pour les mises a jour OTA
-
+const char* PASS = ""; //A modifier avec le mot de passe voulu, il sera utilise pour les mises a jour OTA
+bool isMoving = false; //Indique si les volets sont en mouvement
 char timeCourseup[3] = ""; //Variable qui sera utilisée par WiFiManager pour enregistrer le temp de course du volet
 char timeCoursedown[3] = "";
 const byte eepromOffset = 0;
 unsigned long upCourseTime = 20 * 1000; //Valeur par défaut du temps de course en montée, un temps de course de descente peut aussi être défini
 unsigned long downCourseTime = 20 * 1000;
 const float calibrationRatio = 0.1;
-
-int R1state;  // remove init value
-int R2state;
-int In1state;
-int In2state;
-int lastR1state;
-int lastR2state;
-int lastIn1state;
-int lastIn2state;
-
+char ESP8266Client[20]  = "VR_Empty"; //Default
+int doubleLongPressStart = 0; //Time during double long press
+Ticker ticker;
+bool localModeOnly = true; //Disable the mqtt send while it is not connected
+bool shutterInitialized = false; //Indicate if the shutter library has been initialized
 //Wifimanager 
+         
 //flag for saving data
 bool shouldSaveConfig = false;
 //callback notifying us of the need to save config
 void saveConfigCallback () {
   Serial.println("Should save config");
   shouldSaveConfig = true;
+  localModeOnly = false;
+  ticker.detach();
+}
+
+void configModeCallback (WiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+  //entered config mode, make led toggle faster
+  localModeOnly = true;
+  ticker.attach(0.05, loopLocalShutter);
 }
 
 
 // NOMAGE MQTT
-#define relais1_topic "Volet/PFSalon/Relais1"
-#define relais2_topic "Volet/PFSalon/Relais2"
-#define entree1_topic "Volet/PFSalon/Entree1"
-#define entree2_topic "Volet/PFSalon/Entree2"
-#define position_topic "Volet/PFSalon/Position"
-#define JeedomIn_topic "Volet/PFSalon/in"
-#define JeedomOut_topic "Volet/PFSalon/out"
-#define ESP8266Client "Volet_PFSalon" //Nom du peripherique sur le reseau
+#define relais1_topic "/Relais1"
+#define relais2_topic "/Relais2"
+//#define entree1_topic "/Entree1"
+//#define entree2_topic "/Entree2"
+#define position_topic "/Position"
+#define BtUpClick_topic "/BtUpClick"
+#define BtUpLongClick_topic "/BtUpLongClick"
+#define BtUpDblClick_topic "/BtUpDblClick"
+#define BtDownClick_topic "/BtDownClick"
+#define BtDownLongClick_topic "/BtDownLongClick"
+#define BtDownDblClick_topic "/BtDownDblClick"
+#define JeedomIn_topic "/in"
+#define JeedomOut_topic "/out"
+#define prefix_topic "Jeedom/"
+#define CONST_TRUE "1"
+#define CONST_FALSE "0"
 
-//RELAIS 1    peut être doit on les inverser
-const int R1pin = 13; // Relais Up
+// DEFINITION DES GPIOS
+//RELAIS 1
+const int R1Pin = 4;
 //RELAIS 2
-const int R2pin = 12;  // Relais Down
+const int R2pin = 5;
 //ENTREE 1
-const int In1pin = 5; // Up
+const int In1pin = 14;
 //ENTREE 2
-const int In2pin = 4; // Down
+const int In2pin = 12;
+// Setup a new OneButton 
+OneButton button1(In1pin, false);
+// Setup a new OneButton
+OneButton button2(In2pin, false);
 
 // VARIABLES
+//POSITION
+const char* cmdnamePos = "Position";
 
 char message_buff[100];
 
-WiFiClient espClientVolet_PFSalon;  // A renommer pour chaque volets
-PubSubClient client(espClientVolet_PFSalon); // A renommer pour chaque volets
+WiFiClient espClientVR_Test;  // A renommer pour chaque volets
+PubSubClient client(espClientVR_Test); // A renommer pour chaque volets
 
 //***********************************************************************************
 // FONCTIONS LIBRAIRIE position volets
@@ -89,18 +122,15 @@ void shuttersOperationHandler(Shutters* s, ShuttersOperation operation) {
   switch (operation) {
     case ShuttersOperation::UP:
       if (debug){Serial.println("Shutters going up.");}
-        up();
-        //mqtt();
+        up();       
       break;
     case ShuttersOperation::DOWN:
-      if (debug){Serial.println("Shutters going down.");}
+  if (debug){Serial.println("Shutters going down.");}
         dwn();
-        //mqtt();
       break;
     case ShuttersOperation::HALT:
       if (debug){Serial.println("Shutters halting.");}
         stp();
-        mqttlevel();
       break;
   }
 }
@@ -127,9 +157,11 @@ void onShuttersLevelReached(Shutters* shutters, byte level) {
   Serial.println("%");
   }
   if ((level % 10) == 0) {
-  mqttlevel();  
+  char charlevel[4];
+  sprintf(charlevel, "%d", level); 
+  mqttPublish(position_topic,charlevel); 
   }
-  }
+}
 
 Shutters shutters;
 //
@@ -138,8 +170,32 @@ Shutters shutters;
 // SETUP
 
 void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);   
+  digitalWrite(LED_BUILTIN, LOW);   // Turn the LED on to indicate the the module is starting
+
+// INITIALYZE GPIO
+  pinMode(R1Pin, OUTPUT);
+  pinMode(R2pin, OUTPUT);
+  //digitalWrite(R1Pin, 0);
+  //digitalWrite(R2pin, 0);
+
+  // link the button 1 functions.
+  button1.attachClick(click1);
+  button1.attachDoubleClick(doubleclick1);
+  button1.attachLongPressStart(longPressStart1);
+  button1.attachLongPressStop(longPressStop1);
+  button1.attachDuringLongPress(longPress1);
+
+  // link the button 2 functions.
+  button2.attachClick(click2);
+  button2.attachDoubleClick(doubleclick2);
+  button2.attachLongPressStart(longPressStart2);
+  button2.attachLongPressStop(longPressStop2);
+  button2.attachDuringLongPress(longPress2);
+
   
-  
+  localModeOnly = true;
+  ticker.attach(0.05, loopLocalShutter);
   //SERIAL//
   Serial.begin(115200);
   delay(100);
@@ -148,28 +204,8 @@ void setup() {
   #endif
   Serial.println();
   Serial.println("*** Starting ***");
+  Serial.println(ESP8266Client);                
 
-  Serial.println(ESP8266Client);
-  
-  R1state = digitalRead(R1pin);
-  R2state = digitalRead(R2pin);
-  In1state = digitalRead(In1pin);
-  In2state = digitalRead(In2pin);
-  lastR1state = R1state;
-  lastR2state = R2state;
-  lastIn1state = In1state;
-  lastIn2state = In2state;
-  if (debug){
-  Serial.print("R1state:" );
-  Serial.println(R1state); 
-  Serial.print("R2state:" );
-  Serial.println(R2state); 
-  Serial.print("In1state:" );
-  Serial.println(In1state); 
-  Serial.print("In2state:" );
-  Serial.println(In2state); 
-  }
-     
 if (raz){
   Serial.println("Réinitialisation de la configuration (reset SPIFFS).");
   SPIFFS.format();
@@ -196,6 +232,7 @@ if (raz){
           strcpy(mqtthost, json["mqtthost"]);
           strcpy(timeCourseup, json["timeCourseup"]);
           strcpy(timeCoursedown, json["timeCoursedown"]);
+          strcpy(ESP8266Client, json["ESP8266Client"]);
           upCourseTime = (strtoul (timeCourseup, NULL, 10)) * 1000; //On retype la variable (%ul unsigned long) et on la multiplie par 1000 (ce sont des millisecondes)
           downCourseTime = (strtoul (timeCoursedown, NULL, 10)) * 1000;
          } else {
@@ -211,14 +248,17 @@ if (raz){
   //WIFI// 
   WiFiManager wifiManager;
   wifiManager.setSaveConfigCallback(saveConfigCallback);
+  wifiManager.setAPCallback(configModeCallback);
   //Ajout de la variable de configuration MQTT Server (ou Broker)
   WiFiManagerParameter custom_mqtthost("server", "mqtt server", mqtthost, 16);
   WiFiManagerParameter custom_timeCourse_up("time_course_up", "Time Course Up", timeCourseup, 3);
   WiFiManagerParameter custom_timeCourse_down("time_course_down", "Time Course Down", timeCoursedown, 3);
+  WiFiManagerParameter custom_ESP8266Client("ESP8266Client", "ESPName", ESP8266Client, 20);
   wifiManager.addParameter(&custom_mqtthost);
   wifiManager.addParameter(&custom_timeCourse_up);
   wifiManager.addParameter(&custom_timeCourse_down);
-  
+  wifiManager.addParameter(&custom_ESP8266Client);
+
   wifiManager.autoConnect(ESP8266Client, PASS);
 
 //reset settings - for testing
@@ -226,7 +266,7 @@ if (raz){
   Serial.println("Réinitialisation de WiFiManager.");
   wifiManager.resetSettings();
   }
-// Configuration OTA
+  // Configuration OTA
   //Port 8266 (defaut)
   ArduinoOTA.setPort(8266);
   //Hostname 
@@ -270,13 +310,14 @@ if (raz){
   Serial.println("");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  
+
   //Lecture de la valeur MQTT server enregistrée dans le fichier de config json
   strcpy(mqtthost, custom_mqtthost.getValue());
   strcpy(timeCourseup, custom_timeCourse_up.getValue());
   upCourseTime = (strtoul (timeCourseup, NULL, 10)) * 1000; //On retype la variable (%ul unsigned long) et on la multiplie par 1000 (ce sont des millisecondes)
   strcpy(timeCoursedown, custom_timeCourse_down.getValue());
   downCourseTime = (strtoul (timeCoursedown, NULL, 10)) * 1000;
+  strcpy (ESP8266Client, custom_ESP8266Client.getValue());
   //Sauvegarde des valeurs dans le fichier de configuration json
   if (shouldSaveConfig) {
     Serial.println("saving config");
@@ -285,6 +326,7 @@ if (raz){
     json["mqtthost"] = mqtthost;
     json["timeCourseup"] = timeCourseup;
     json["timeCoursedown"] = timeCoursedown;
+    json["ESP8266Client"] = ESP8266Client;
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
       Serial.println("Erreur lors de l'ouverture du fichier de config json pour enregistrement");
@@ -294,23 +336,10 @@ if (raz){
     configFile.close();
     //end save
   }
-//MQTT//
-  
-  client.setServer(mqtthost, 1883);
-  Serial.print("host MQTT :");
-  Serial.println(mqtthost);
-  client.setCallback(callback);
 
-// INITIALYZE GPIO
-  pinMode(R1pin, OUTPUT);
-  pinMode(R2pin, OUTPUT);
-  //digitalWrite(R1pin, 0);
-  //digitalWrite(R2pin, 0);
-  pinMode(In1pin, INPUT_PULLUP);
-  pinMode(In2pin, INPUT_PULLUP);
-
-    
-  char storedShuttersState[shutters.getStateLength()];
+//Shutters //
+	stp();//Stop the shutter before initialize
+ char storedShuttersState[shutters.getStateLength()];
   readInEeprom(storedShuttersState, shutters.getStateLength());
   shutters
     .setOperationHandler(shuttersOperationHandler)
@@ -319,10 +348,27 @@ if (raz){
     .setCourseTime(upCourseTime, downCourseTime)
     .onLevelReached(onShuttersLevelReached)
     .begin();
+  shutterInitialized = true;
+//MQTT//
   
-  if (debug){Serial.println("Shutter Begin");
-  }
+  client.setServer(mqtthost, 1883);
+  Serial.print("host MQTT :");
+  Serial.println(mqtthost);
+  client.setCallback(callback);
+
+
+  Serial.print("storedShuttersState :"); 
+  Serial.println(storedShuttersState);  
+
+  Serial.println("Shutter Begin");
+  mqttInit();
+  digitalWrite(LED_BUILTIN, HIGH);   // Turn the LED off to indicate the the module is Ready
+  localModeOnly = false;
+  ticker.detach();
 }
+
+
+
 //***********************************************************************************
 // FONCTION Reset + Format memoire ESP
 void eraz(){
@@ -330,11 +376,21 @@ void eraz(){
 if (debug){Serial.println("Réinitialisation de WiFiManager.");}
   wifiManager.resetSettings();
 if (debug){Serial.println("Réinitialisation de la configuration (reset SPIFFS).");}
-  SPIFFS.format();
-ESP.reset();
+  //SPIFFS.format();
+ESP.restart();
 }
 
-//***********************************************************************************
+void shutterRaz(){
+  if (debug){Serial.println("Réinitialisation shutter");}
+  shutters
+    .reset()
+    .setOperationHandler(shuttersOperationHandler)
+    .setWriteStateHandler(shuttersWriteStateHandler)
+    .setCourseTime(upCourseTime, downCourseTime)
+    .onLevelReached(onShuttersLevelReached)
+    .begin();
+}
+
 // FONCTION communication MQTT JEEDOM VERS ESP
 void callback(char* topic, byte* payload, unsigned int length) {
   int i = 0;
@@ -354,7 +410,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
    uint8_t niv = msgString.toInt();
    
-  if (niv >= 0 && niv <= 100 &&  msgString != "up" && msgString != "dwn" && msgString != "stp" && msgString != "raz"){
+  if (niv >= 0 && niv <= 100 &&  msgString != "up" && msgString != "dwn" && msgString != "stp" && msgString != "raz" && msgString != "shutraz"){
     shutters.setLevel(niv);
   }
     else if ( msgString == "up" ) {
@@ -364,7 +420,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
   } else if ( msgString == "stp" ){
     shutters.stop();  
   } else if ( msgString == "raz" ){
-    eraz();
+  eraz();
+  } else if ( msgString == "shutraz" ){
+  shutterRaz();
   }
 }
 
@@ -373,233 +431,263 @@ void callback(char* topic, byte* payload, unsigned int length) {
 void reconnect() { 
   // Loop until we're reconnected
   long now1 = millis();
-  if (debug){
-  Serial.print("Attente de connexion MQTT...");}
+  if (debug){    
+    Serial.print("Attente de connexion MQTT...");}
+	digitalWrite(LED_BUILTIN, LOW);   // Turn the LED on to indicate the the module is not Ready
+	ticker.attach(0.05, loopLocalShutter);
     // Attempt to connect
-    if (client.connect(ESP8266Client)) {
+    if (client.connect(ESP8266Client)) {  
       float connectedepuis = (now1 - lastConnect)/1000;
       if (debug){Serial.print("connected depuis :");
       Serial.println(connectedepuis);}
       // Once connected, publish an announcement...
-      client.publish(JeedomIn_topic, String(connectedepuis).c_str());
+      String topicString = String();
+      topicString = String(prefix_topic) + String(ESP8266Client) + String(JeedomIn_topic);
+      client.publish(string2char(topicString), String(connectedepuis).c_str());
       lastConnect = now1;
       // ... and resubscribe
-      client.subscribe(JeedomOut_topic);
+      topicString = String(prefix_topic) + String(ESP8266Client) + String(JeedomOut_topic);
+      client.subscribe(string2char(topicString));
+	  digitalWrite(LED_BUILTIN, HIGH);   // Turn the LED off to indicate the the module is Ready	
+	  ticker.detach();
     } else {
-  if (debug){
+  if (debug){    
       Serial.print("Erreur, rc=");
-      Serial.print(client.state());
-  Serial.println(" Nouvelle tentative dans 5 secondes");}
-      // Wait 5 seconds before retrying
-      }
+      Serial.print(client.state());}               
+    }
   }
 
 //***********************************************************************************
 // LOOP
 void loop(void){
-  
-R1state = digitalRead(R1pin);
-R2state = digitalRead(R2pin);
-In1state = digitalRead(In1pin);
-In2state = digitalRead(In2pin);
-
+  unsigned long currentMillis = millis();
   unsigned long now = millis();
-  
+  //Serial.println(" now :");
+  //Serial.println(now);
+
   if (now - lastMsg > 5000) {
-     lastMsg = now;
+    //Serial.println(" now :");
+    //Serial.println(now);
+    lastMsg = now;
     if (!client.connected()) {
       if (debug){Serial.println("client reconnexion");}
-      reconnect();
-    }}
-  
-if (R1state != lastR1state){
-  if (debug){Serial.println("declenchement par R1" );}
-  mqttR1();
-  lastR1state = R1state;
-}
-if (R2state != lastR2state){
-  if (debug){Serial.println("declenchement par R2" );}
-  mqttR2();
-  lastR2state = R2state;
-} 
-if (In1state != lastIn1state){
-  if (debug){Serial.println("declenchement par In1" );}
-  OutIn();
-  mqttIn1();
-  lastIn1state = In1state;
-}
-if (In2state != lastIn2state){
-  if (debug){Serial.println("declenchement par In2" );}
-  OutIn();
-  mqttIn2();
-  lastIn2state = In2state;
-}
+      reconnect();       
+    }         
+  }
   ArduinoOTA.handle();
   client.loop();
-  shutters.loop();  
+  loopLocalShutter();
+}
+
+//Local shutter management
+void loopLocalShutter()
+{
+  if (shutterInitialized) shutters.loop();  
+  button1.tick();
+  button2.tick();
+  
+   //Detect the longpress on both button
+  if (!DisableRazFunction && button1.isLongPressed() && button2.isLongPressed())
+  {
+    doubleLongPressStart = millis() - doubleLongPressStart;
+    if (doubleLongPressStart > 10*1000) //More the 10 second long Press
+    {
+      shutters.stop();
+     eraz();
+    }
+ }
+  else
+    doubleLongPressStart = millis();
 }
 
 //***********************************************************************************
 // FONCTION MQTT ESP VERS JEEDOM
-void mqttR1(){
-char Relais1[2];
-sprintf(Relais1, "%d", digitalRead(R1pin)); 
-if (!client.connected()) {
-    reconnect();
+void mqttPublish(char* topic, char* value)
+{  
+  if (!localModeOnly){
+     if (!client.connected()) {
+      reconnect();
+    }
+    else {  
+      if (debug){
+      Serial.print("envoi MQTT");
+    Serial.print(topic);
+    Serial.print(" : ");
+    Serial.println(value);
+      }
+     String topicString = String();
+      topicString = String(prefix_topic) + String(ESP8266Client) + String(topic);
+      client.publish(string2char(topicString), value);
+    }
   }
-  else {
-    if (debug){
-   Serial.print("envoi MQTTR1 :");
-   Serial.println(Relais1);
- }
-client.publish(relais1_topic, Relais1);
 }
-}
-
-void mqttR2(){
-char Relais2[2];
-sprintf(Relais2, "%d", digitalRead(R2pin));
-if (!client.connected()) {
-    reconnect();
-  }
-  else {
-    if (debug){
-   Serial.print("envoi MQTTR2 :");
-   Serial.println(Relais2);
- }
-client.publish(relais2_topic, Relais2);
-}
-}
-
-void mqttIn1(){
-char Entree1[2];
-sprintf(Entree1, "%d", digitalRead(In1pin));
-if (!client.connected()) {
-    reconnect();
-  }
-  else {
-if (debug){
-   Serial.print("envoi MQTTIn1 :");
-   Serial.println(Entree1);
- }
-client.publish(entree1_topic, Entree1);
-}
-}
-
-void mqttIn2(){
-char Entree2[2];
-sprintf(Entree2, "%d", digitalRead(In2pin));
-if (!client.connected()) {
-    reconnect();
-  }
-  else {
-if (debug){
-   Serial.print("envoi MQTTIn2 :");
-   Serial.println(Entree2);
- }
-client.publish(entree2_topic, Entree2);
-}
-}
-
-void mqttlevel(){
+void mqttInit(){
   char level[4];
-  sprintf(level, "%d", shutters.getCurrentLevel());
-if (!client.connected()) {
-    reconnect();
-  }
-  else {  
-if (debug){
-   Serial.print("envoi MQTTlevel :");
-   Serial.println(level);
- }
-     client.publish(position_topic, level);
- }
+  int levelInt;
+  levelInt =  shutters.getCurrentLevel();
+  
+  sprintf(level, "%d", levelInt); 
+    if (debug){
+    Serial.println("envoi MQTT d'initialisation");
+    }
+    mqttPublish(position_topic, level);
+    mqttPublish(BtUpClick_topic,CONST_FALSE);
+    mqttPublish(BtUpLongClick_topic,CONST_FALSE);
+    mqttPublish(BtUpDblClick_topic,CONST_FALSE);
+    mqttPublish(BtDownClick_topic,CONST_FALSE);
+    mqttPublish(BtDownLongClick_topic,CONST_FALSE);
+    mqttPublish(BtDownDblClick_topic,CONST_FALSE);
+
 }
 
 //***********************************************************************************
 // FONCTIONS MOUVEMENTS VOLET
 void up(){
-  digitalWrite(R1pin, 1);
+  if (debug) {Serial.println("Action up");}
+  digitalWrite(R1Pin, 1);
   digitalWrite(R2pin, 0);
-  if (debug){Serial.println("MOUVEMENT: up" );}
-  
+  isMoving = true;
+  if (!localModeOnly)
+  {
+    mqttPublish(relais1_topic, CONST_TRUE);
   }
+ }
 
 void dwn(){
-  digitalWrite(R1pin, 0);
+  if (debug) {Serial.println("Action down");}
+  digitalWrite(R1Pin, 0);
   digitalWrite(R2pin, 1);
-  if (debug){Serial.println("MOUVEMENT: dwn" );}
+  isMoving = true;
+    if (!localModeOnly)
+  {
+    mqttPublish(relais2_topic, CONST_TRUE);
+  }
   }
 
 void stp(){
-  digitalWrite(R1pin, 0);
+  if (debug) {Serial.println("Action stop");}
+  digitalWrite(R1Pin, 0);
   digitalWrite(R2pin, 0);
-  if (debug){Serial.println("MOUVEMENT: stp" );}
+  isMoving = false;
+  char level[4];
+  int levelInt;
+  if (!localModeOnly) 
+  {
+      levelInt =  shutters.getCurrentLevel();
+      sprintf(level, "%d", levelInt); 
+      mqttPublish(position_topic, level);
+      mqttPublish(relais1_topic, CONST_FALSE);
+      mqttPublish(relais2_topic, CONST_FALSE);
+      
   }
+  
+  }
+  
 
 //***********************************************************************************
 //FONCTION SORTIES RELAIS EN FONCTION DES ENTREES POUR COMMANDE LOCAL
-void OutIn(){
-    
-int status = In1state*10 + In2state;
-// status = 10 pour up, 1 pour dwn, 0 pour stp
-int level1 = shutters.getCurrentLevel();
+// ----- button 1 callback functions
+// This function will be called when the button1 was pressed 1 time (and no 2. button press followed).
+void click1() {
 
-switch (status) { 
-   case 10:
-   
+ if (isMoving){
     if (debug){
-      Serial.print("In1state:" );
-      Serial.println(In1state);  
-      Serial.print("In2state:" );
-      Serial.println(In2state);  
-      Serial.print("status:" );
-      Serial.println(status);    
-      }
-      if (level1 != 100){
-      shutters.setLevel(100);
-      }
-      
-  break;
+      Serial.println("Click Up Shutter Moving" );    
+    }
+      if (!shutterInitialized) stp();
+      else shutters.stop();
+    }
+   else{
+     if (debug){
+          Serial.println("Click Up Shutter Up" );
+     }
+              if (shutters.getCurrentLevel() != 100){
+    
+      if (!shutterInitialized) up();
+      else shutters.setLevel(100);
+     }
+   }
+  mqttPublish(BtUpClick_topic, CONST_TRUE);
+  mqttPublish(BtUpClick_topic, CONST_FALSE);
+} // click1
+
+// This function will be called when the button1 was pressed 2 times in a short timeframe.
+void doubleclick1() {
+  Serial.println("Button 1 doubleclick.");
+    mqttPublish(BtUpDblClick_topic,CONST_TRUE); 
+    mqttPublish(BtUpDblClick_topic,CONST_FALSE); 
+} // doubleclick1
+
+// This function will be called once, when the button1 is pressed for a long time.
+void longPressStart1() {
+  Serial.println("Button 1 longPress start");
+  mqttPublish(BtUpLongClick_topic,CONST_TRUE); 
+  mqttPublish(BtUpLongClick_topic,CONST_FALSE); 
+} // longPressStart1
+
+// This function will be called often, while the button1 is pressed for a long time.
+void longPress1() {
+  Serial.println("Button 1 longPress...");
+} // longPress1
+
+// This function will be called once, when the button1 is released after beeing pressed for a long time.
+void longPressStop1() {
+  Serial.println("Button 1 longPress stop");
+} // longPressStop1
+
+// ... and the same for button 2:
+
+void click2() {
+ if (isMoving){
+    if (debug){
+                 
+      Serial.println("Click Down Shutter Moving" );    ;
+    }
+      if (!shutterInitialized) stp();
+      else shutters.stop();
+    }
+   else{
+ if (debug){
+      Serial.println("Click Down Shutter Down" );    ;
+                 
+    }
+          if (shutters.getCurrentLevel() != 0){
+      if (!shutterInitialized) dwn();
+      else shutters.setLevel(0);
+   }
+   }
+   mqttPublish(BtDownClick_topic,CONST_TRUE); 
+   mqttPublish(BtDownClick_topic,CONST_FALSE); 
+} // click2
+
+void doubleclick2() {
+  Serial.println("Button 2 doubleclick.");
+  mqttPublish(BtDownDblClick_topic,CONST_TRUE); 
+  mqttPublish(BtDownDblClick_topic,CONST_FALSE); 
+} // doubleclick2
+
+void longPressStart2() {
+  Serial.println("Button 2 longPress start");
+  mqttPublish(BtDownLongClick_topic,CONST_TRUE); 
+  mqttPublish(BtDownLongClick_topic,CONST_FALSE); 
+} // longPressStart2
+
+void longPress2() {
+  Serial.println("Button 2 longPress...");
+} // longPress2
 
 
-case 1:
-   if (debug){
-      Serial.print("In1state:" );
-      Serial.println(In1state);  
-      Serial.print("In2state:" );
-      Serial.println(In2state);  
-      Serial.print("status:" );
-      Serial.println(status);    
-      }
-      if (level1 != 0){
-      shutters.setLevel(0);
-      }
-   break;
+
+void longPressStop2() {
+
+  Serial.println("Button 2 longPress stop");
+} // longPressStop2
 
 
-case 11:
-   
-   shutters.stop();
-   //mqtt(); 
-   if (debug){
-      Serial.print("In1state:" );
-      Serial.println(In1state);  
-      Serial.print("In2state:" );
-      Serial.println(In2state);  
-      Serial.print("status:" );
-      Serial.println(status);    
-      }
-   
-      
-   break;
+char* string2char(String command){
+    if(command.length()!=0){
+        char *p = const_cast<char*>(command.c_str());
+        return p;
+    }
 
-case 0:
-break;
-
-default: 
-   if (debug){Serial.println("Erreur Switch Case");}
-   break;
-
-}  
 }

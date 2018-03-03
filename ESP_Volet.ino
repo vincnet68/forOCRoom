@@ -60,7 +60,7 @@ void saveConfigCallback () {
   Serial.println("Should save config");
   shouldSaveConfig = true;
   localModeOnly = false;
-  ticker.detach();
+  //ticker.detach();
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -70,7 +70,7 @@ void configModeCallback (WiFiManager *myWiFiManager) {
   Serial.println(myWiFiManager->getConfigPortalSSID());
   //entered config mode, make led toggle faster
   localModeOnly = true;
-  ticker.attach(0.05, loopLocalShutter);
+  //ticker.attach(0.05, loopLocalShutter);
 }
 
 
@@ -195,7 +195,7 @@ void setup() {
 
   
   localModeOnly = true;
-  ticker.attach(0.05, loopLocalShutter);
+  //ticker.attach(0.05, loopLocalShutter);
   //SERIAL//
   Serial.begin(115200);
   delay(100);
@@ -364,7 +364,7 @@ if (raz){
   mqttInit();
   digitalWrite(LED_BUILTIN, HIGH);   // Turn the LED off to indicate the the module is Ready
   localModeOnly = false;
-  ticker.detach();
+  //ticker.detach();
 }
 
 
@@ -434,7 +434,7 @@ void reconnect() {
   if (debug){    
     Serial.print("Attente de connexion MQTT...");}
 	digitalWrite(LED_BUILTIN, LOW);   // Turn the LED on to indicate the the module is not Ready
-	ticker.attach(0.05, loopLocalShutter);
+	//ticker.attach(0.05, loopLocalShutter);
     // Attempt to connect
     if (client.connect(ESP8266Client)) {  
       float connectedepuis = (now1 - lastConnect)/1000;
@@ -449,7 +449,7 @@ void reconnect() {
       topicString = String(prefix_topic) + String(ESP8266Client) + String(JeedomOut_topic);
       client.subscribe(string2char(topicString));
 	  digitalWrite(LED_BUILTIN, HIGH);   // Turn the LED off to indicate the the module is Ready	
-	  ticker.detach();
+	  //ticker.detach();
     } else {
   if (debug){    
       Serial.print("Erreur, rc=");

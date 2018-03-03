@@ -1,0 +1,71 @@
+====== Module ESP Volet sur rail DIN ======
+
+Les sources de base sont sur [[https://www.jeedom.com/forum/viewtopic.php?f=185&t=25017|Forum Jeedom Commande volet roulant avec ESPeasy]]
+
+Le git de la communauté pour le module electrodragon est : [[https://github.com/Gis70/Sketch-volet-roulant-esp8266]]
+===== Hardware =====
+
+{{http://nsm07.casimages.com/img/2017/03/18//17031810343315377714926534.jpg?200|}}
+{{http://nsm07.casimages.com/img/2017/02/16//17021606322315377714851370.jpg?200|}}
+
+
+==== Matériel ====
+
+
+^ Qte ^ Désignation ^ Fournisseur ^ Ref ^
+| 1 |Wemos D1 mini et ses barrettes| |
+| 1 |boîtier cp-z-106|TME |Z106J ABS V0|
+| 1 |470µF/25V|TME|CE-470/25PHT-Y|
+| 1 |10K (subminiat)|TME|CF1/4WS-10K|
+| 2 |180 (subminiat)|TME|CF1/4WS-180R|
+| 3 |10K smd |TME|1206S4F1002T5E|
+| 1 |diode 1N5819 smd|TME|SKL16-DIO|
+| 2 |diode 1N4148|TME|1N4148-DIO|
+| 2 |opto EL817|TME|EL817|
+| 2 |transistor 2n7000|TME|2N7000-DIO|
+| 2 |barrettes 3 broches 5.0|TME|EB147A-03-C|
+| 2 |barrettes 2 broches 7.5|TME|EB147A-02-M|
+| 2 |relais Relpol|TME|RM12-2011-35-1005|
+| 1 |barrette 2X6 broches femelle|TME|DS1065-03-2X20S8BV (à couper )|
+| 1 |barrette 1X6 broches malle coudé|TME|ZL211-40KG (à couper)|
+
+==== Circuit imprimé ====
+
+=== Version de base ===
+
+
+{{:domotique:module_esp:pcbbase.png?200|}}
+
+Fichiers Gerber
+
+{{ :domotique:module_esp:pcbbase.zip|}}
+
+
+=== Version optimisé par Seeed Studio ===
+//La version de base était fausse car le buttom était inversé, les gerbers ont été renommé en top (Version non testé du 09/01/2018)//
+
+{{:domotique:module_esp:pcbdouble.png?200|}}
+
+Fichiers Gerber
+
+{{ :domotique:module_esp:pcbdouble.zip|}}
+
+
+
+==== Répartition des pins ====
+
+  * D5 (out 14), D6 (out 12) sorties
+  * D2 (in 4), D1 (in 5) entrée
+
+===== Software =====
+
+==== Librairie ====
+
+
+  * [[https://github.com/marvinroger/arduino-shutters|Shutter V 3.0.0 Beta 4]]
+  * [[https://pubsubclient.knolleary.net/|PubSubClient V 2.6.0]]
+  * [[https://github.com/tzapu/WiFiManager|WifiManager V0.12.0]]
+  * [[https://arduinojson.org/|ArduinoJson 5.12.0]]
+  * [[https://github.com/mathertel/OneButton|OneButton V 1.2.0]]
+==== Code ====
+[[http://gitlab.vincnet68.fr/ESP_Volet_MQTT/Rail_DIN_V1|GitLab Vincnet68]]
